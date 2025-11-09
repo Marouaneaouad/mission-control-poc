@@ -17,6 +17,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from agent_registry import get_registry, AgentConfig
 from metrics_engine import MetricsEngine
+import re
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -40,28 +41,10 @@ st.markdown("""
         color: #64748B;
         margin-bottom: 2rem;
     }
-    .metric-card {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        padding: 1.5rem;
-        border-radius: 10px;
-        color: white;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-    }
     .health-excellent { color: #10B981; font-weight: 700; }
     .health-good { color: #3B82F6; font-weight: 700; }
     .health-warning { color: #F59E0B; font-weight: 700; }
     .health-critical { color: #EF4444; font-weight: 700; }
-    .agent-card {
-        border: 2px solid #E5E7EB;
-        border-radius: 12px;
-        padding: 1.5rem;
-        margin: 1rem 0;
-        transition: all 0.3s;
-    }
-    .agent-card:hover {
-        border-color: #3B82F6;
-        box-shadow: 0 4px 12px rgba(59, 130, 246, 0.2);
-    }
     .status-active { 
         background-color: #10B981; 
         color: white; 
@@ -70,16 +53,38 @@ st.markdown("""
         font-size: 0.875rem;
         font-weight: 600;
     }
-    .status-maintenance { 
-        background-color: #F59E0B; 
-        color: white; 
-        padding: 0.25rem 0.75rem; 
-        border-radius: 12px; 
-        font-size: 0.875rem;
-        font-weight: 600;
+    .rationale-thinking {
+        background-color: #F0F9FF;
+        border-left: 4px solid #3B82F6;
+        padding: 0.75rem;
+        margin: 0.5rem 0;
+        border-radius: 4px;
+        font-family: monospace;
+        font-size: 0.9rem;
     }
-    div[data-testid="stMetricValue"] {
-        font-size: 1.8rem;
+    .rationale-tool {
+        background-color: #FEF3C7;
+        border-left: 4px solid #F59E0B;
+        padding: 0.75rem;
+        margin: 0.5rem 0;
+        border-radius: 4px;
+        font-family: monospace;
+        font-size: 0.9rem;
+    }
+    .rationale-answer {
+        background-color: #F0FDF4;
+        border-left: 4px solid #10B981;
+        padding: 0.75rem;
+        margin: 0.5rem 0;
+        border-radius: 4px;
+    }
+    .feedback-negative {
+        background-color: #FEE2E2;
+        border-left: 4px solid #EF4444;
+        padding: 0.5rem;
+        margin: 0.5rem 0;
+        border-radius: 4px;
+        font-weight: 600;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -98,6 +103,59 @@ except (FileNotFoundError, KeyError):
     AWS_REGION = os.getenv("AWS_DEFAULT_REGION")
     APP_PASSWORD = os.getenv("APP_PASSWORD", "admin")
     DYNAMODB_TABLE_NAME = os.getenv("DYNAMODB_TABLE_NAME", "PatrickUsageLogs")
+
+# --- Helper function to parse agent rationale ---
+def parse_agent_rationale(rationale_text):
+    """
+    Parse agent rationale and extract thinking, tool calls, and answers.
+    Returns structured data for display.
+    """
+    if not rationale_text or pd.isna(rationale_text) or rationale_text == '':
+        return []
+    
+    steps = []
+    
+    # Split by step markers
+    step_pattern = r'(?:---\s*Step\s*\d+:|→|←)'
+    parts = re.split(step_pattern, str(rationale_text))
+    
+    for part in parts:
+        if not part.strip():
+            continue
+            
+        # Extract thinking
+        thinking_match = re.search(r'<thinking>(.*?)</thinking>', part, re.DOTALL)
+        if thinking_match:
+            steps.append({
+                'type': 'thinking',
+                'content': thinking_match.group(1).strip()
+            })
+        
+        # Extract tool calls
+        tool_match = re.search(r'Calling Tool:\s*([^\(]+)\([^\)]*\)', part)
+        if tool_match:
+            steps.append({
+                'type': 'tool_call',
+                'content': f"Calling: {tool_match.group(1).strip()}"
+            })
+        
+        # Extract tool results
+        result_match = re.search(r'Tool Result:\s*(.+?)(?=→|←|---|\Z)', part, re.DOTALL)
+        if result_match:
+            steps.append({
+                'type': 'tool_result',
+                'content': result_match.group(1).strip()[:200]  # Limit length
+            })
+        
+        # Extract answers
+        answer_match = re.search(r'<answer[^>]*>(.*?)</answer>', part, re.DOTALL)
+        if answer_match:
+            steps.append({
+                'type': 'answer',
+                'content': answer_match.group(1).strip()
+            })
+    
+    return steps
 
 # --- Password Protection ---
 def check_password():
@@ -169,10 +227,11 @@ def fetch_dynamodb_data(_dynamodb, table_name, days=7):
         
         # Fill missing values
         df['feedbackStatus'] = df['feedbackStatus'].fillna('')
-        df['feedbackReason'] = df['feedbackReason'].fillna('N/A')
+        df['feedbackReason'] = df['feedbackReason'].fillna('')
         df['agentLatency'] = df['agentLatency'].fillna(0)
         df['inputTokens'] = df['inputTokens'].fillna(0)
         df['outputTokens'] = df['outputTokens'].fillna(0)
+        df['agentRationale'] = df['agentRationale'].fillna('')
         
         return df
         
@@ -231,7 +290,7 @@ if check_password():
             metrics_engine = MetricsEngine(log_df)
             fleet_metrics = metrics_engine.get_fleet_metrics()
             
-            # Fleet Health Score
+            # Fleet Health Score with explanation
             health_score = fleet_metrics['health_score']
             health_class = (
                 "health-excellent" if health_score >= 90 else
@@ -240,9 +299,29 @@ if check_password():
                 "health-critical"
             )
             
-            st.markdown(f"""
-            ### 🏥 Fleet Health Score: <span class="{health_class}">{health_score:.0f}%</span>
-            """, unsafe_allow_html=True)
+            col_health, col_info = st.columns([2, 1])
+            
+            with col_health:
+                st.markdown(f"""
+                ### 🏥 Fleet Health Score: <span class="{health_class}">{health_score:.0f}%</span>
+                """, unsafe_allow_html=True)
+            
+            with col_info:
+                with st.expander("ℹ️ What is Fleet Health Score?"):
+                    st.markdown("""
+                    **Fleet Health Score** is a composite metric (0-100%) that measures overall system health:
+                    
+                    📊 **Components:**
+                    - **Error Rate** (40 points): Lower errors = higher score
+                    - **Response Time** (30 points): Faster responses = higher score  
+                    - **User Satisfaction** (30 points): More positive feedback = higher score
+                    
+                    🎯 **Scoring:**
+                    - **90-100%**: Excellent (Green) - System performing optimally
+                    - **75-89%**: Good (Blue) - Minor issues, acceptable performance
+                    - **60-74%**: Warning (Yellow) - Attention needed
+                    - **<60%**: Critical (Red) - Immediate action required
+                    """)
             
             st.markdown("---")
             
@@ -259,8 +338,8 @@ if check_password():
                 st.caption(f"~{daily_avg:.0f} queries/day")
             
             with col3:
-                st.metric("Avg Response Time", f"{fleet_metrics['avg_latency_ms']/1000:.2f}s")
-                st.metric("P95 Latency", f"{fleet_metrics['p95_latency_ms']/1000:.2f}s")
+                st.metric("Avg Response Time", f"{fleet_metrics['avg_latency_sec']:.2f}s")
+                st.metric("P95 Latency", f"{fleet_metrics['p95_latency_sec']:.2f}s")
             
             with col4:
                 st.metric("Success Rate", f"{100 - fleet_metrics['error_rate']:.1f}%")
@@ -268,7 +347,7 @@ if check_password():
             
             with col5:
                 st.metric("Positive Feedback", f"{fleet_metrics['positive_feedback_rate']:.1f}%")
-                st.caption(f"{fleet_metrics['positive_feedback']} / {fleet_metrics['total_feedback']} responses")
+                st.caption(f"{fleet_metrics['positive_feedback']} / {fleet_metrics['total_feedback']} rated")
             
             st.markdown("---")
             
@@ -285,7 +364,6 @@ if check_password():
             
             with col_cost3:
                 st.metric("Monthly Projection", f"${fleet_metrics['monthly_projection']:.2f}")
-                delta_color = "off" if fleet_metrics['monthly_projection'] < 1500 else "inverse"
                 st.caption("Based on current usage")
             
             with col_cost4:
@@ -354,7 +432,7 @@ if check_password():
                             st.metric("Queries", f"{agent_metrics['total_queries']:,}")
                         
                         with m2:
-                            st.metric("Avg Latency", f"{agent_metrics['avg_latency_ms']:.0f}ms")
+                            st.metric("Avg Latency", f"{agent_metrics['avg_latency_sec']:.2f}s")
                         
                         with m3:
                             st.metric("Success Rate", f"{agent_metrics['success_rate']:.1f}%")
@@ -422,7 +500,7 @@ if check_password():
                 st.metric("Sessions", f"{agent_metrics['total_sessions']:,}")
             
             with col2:
-                st.metric("Avg Latency", f"{agent_metrics['avg_latency_ms']:.0f}ms")
+                st.metric("Avg Latency", f"{agent_metrics['avg_latency_sec']:.2f}s")
                 sla_compliance = agent_metrics['sla_latency_compliance']
                 st.caption(f"SLA Compliance: {sla_compliance:.1f}%")
             
@@ -432,7 +510,7 @@ if check_password():
             
             with col4:
                 st.metric("Positive Feedback", f"{agent_metrics['positive_feedback_rate']:.1f}%")
-                st.caption(f"{agent_metrics['positive_feedback']}/{agent_metrics['total_feedback']}")
+                st.caption(f"{agent_metrics['positive_feedback']}/{agent_metrics['total_feedback']} rated")
             
             with col5:
                 st.metric("Total Cost (7d)", f"${agent_metrics['total_cost']:.2f}")
@@ -446,18 +524,19 @@ if check_password():
             with col_lat1:
                 st.markdown("### ⏱️ Latency Distribution")
                 
-                agent_df = log_df[log_df['agent_id'] == selected_agent_id]
+                agent_df = log_df[log_df['agent_id'] == selected_agent_id].copy()
+                agent_df['agentLatency_sec'] = agent_df['agentLatency'] / 1000
                 
                 fig = px.histogram(
                     agent_df, 
-                    x='agentLatency',
+                    x='agentLatency_sec',
                     nbins=50,
                     title='',
-                    labels={'agentLatency': 'Latency (ms)', 'count': 'Frequency'},
+                    labels={'agentLatency_sec': 'Latency (seconds)', 'count': 'Frequency'},
                     color_discrete_sequence=['#3B82F6']
                 )
                 fig.add_vline(
-                    x=agent_metrics['p95_latency_ms'], 
+                    x=agent_metrics['p95_latency_sec'], 
                     line_dash="dash", 
                     line_color="red",
                     annotation_text="P95"
@@ -467,13 +546,13 @@ if check_password():
             
             with col_lat2:
                 st.markdown("### 📏 Percentiles")
-                st.metric("P50 (Median)", f"{agent_metrics['p50_latency_ms']:.0f}ms")
-                st.metric("P90", f"{agent_metrics['p90_latency_ms']:.0f}ms")
-                st.metric("P95", f"{agent_metrics['p95_latency_ms']:.0f}ms")
-                st.metric("P99", f"{agent_metrics['p99_latency_ms']:.0f}ms")
+                st.metric("P50 (Median)", f"{agent_metrics['p50_latency_sec']:.2f}s")
+                st.metric("P90", f"{agent_metrics['p90_latency_sec']:.2f}s")
+                st.metric("P95", f"{agent_metrics['p95_latency_sec']:.2f}s")
+                st.metric("P99", f"{agent_metrics['p99_latency_sec']:.2f}s")
                 
                 st.markdown("---")
-                st.caption(f"**SLA Target:** {agent_config.target_latency_ms}ms")
+                st.caption(f"**SLA Target:** {agent_metrics['target_latency_sec']:.2f}s")
                 st.caption(f"**Compliance:** {agent_metrics['sla_latency_compliance']:.1f}%")
             
             st.markdown("---")
@@ -515,7 +594,6 @@ if check_password():
                     fig.update_traces(line_color='#10B981', marker=dict(size=8))
                     fig.update_layout(height=300)
                     
-                    # Add threshold line if configured
                     if agent_config.daily_cost_threshold:
                         fig.add_hline(
                             y=agent_config.daily_cost_threshold,
@@ -534,7 +612,8 @@ if check_password():
             agent_df = log_df[log_df['agent_id'] == selected_agent_id]
             negative_feedback_df = agent_df[
                 (agent_df['feedbackStatus'] == 'negative') & 
-                (agent_df['feedbackReason'] != 'N/A')
+                (agent_df['feedbackReason'] != '') &
+                (agent_df['feedbackReason'].notna())
             ]
             
             if not negative_feedback_df.empty:
@@ -568,7 +647,7 @@ if check_password():
     
     elif page == "💰 Cost Analytics":
         st.markdown('<div class="main-header">💰 Cost Analytics</div>', unsafe_allow_html=True)
-        st.markdown('<div class="sub-header">Comprehensive cost tracking and projections across all agents</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sub-header">Comprehensive cost tracking with dynamic per-query model-based calculation</div>', unsafe_allow_html=True)
         
         if not log_df.empty:
             metrics_engine = MetricsEngine(log_df)
@@ -597,6 +676,7 @@ if check_password():
             
             # Cost breakdown table
             st.markdown("### 📊 Cost Breakdown by Agent")
+            st.caption("💡 **Note:** Costs calculated dynamically per query based on modelId - agents can use different models!")
             
             if not cost_breakdown.empty:
                 display_df = cost_breakdown[['agent_name', 'queries', 'total_cost', 
@@ -675,102 +755,6 @@ if check_password():
         else:
             st.warning("⚠️ No cost data available.")
     
-    elif page == "🔬 Session Explorer":
-        st.markdown('<div class="main-header">🔬 Session Explorer</div>', unsafe_allow_html=True)
-        st.markdown('<div class="sub-header">Deep dive into individual sessions and conversations</div>', unsafe_allow_html=True)
-        
-        if not log_df.empty:
-            # Filter options
-            col_filter1, col_filter2, col_filter3 = st.columns(3)
-            
-            with col_filter1:
-                agent_filter = st.multiselect(
-                    "Filter by Agent",
-                    options=log_df['agent_id'].unique(),
-                    default=list(log_df['agent_id'].unique())
-                )
-            
-            with col_filter2:
-                feedback_filter = st.selectbox(
-                    "Filter by Feedback",
-                    options=["All", "Positive", "Negative", "No Feedback"],
-                    index=0
-                )
-            
-            with col_filter3:
-                status_filter = st.selectbox(
-                    "Filter by Status",
-                    options=["All", "SUCCESS", "ERROR"],
-                    index=0
-                )
-            
-            # Apply filters
-            filtered_df = log_df[log_df['agent_id'].isin(agent_filter)]
-            
-            if feedback_filter == "Positive":
-                filtered_df = filtered_df[filtered_df['feedbackStatus'] == 'positive']
-            elif feedback_filter == "Negative":
-                filtered_df = filtered_df[filtered_df['feedbackStatus'] == 'negative']
-            elif feedback_filter == "No Feedback":
-                filtered_df = filtered_df[filtered_df['feedbackStatus'] == '']
-            
-            if status_filter != "All":
-                filtered_df = filtered_df[filtered_df['status'] == status_filter]
-            
-            st.markdown(f"**Showing {len(filtered_df)} interactions across {filtered_df['sessionId'].nunique()} sessions**")
-            
-            st.markdown("---")
-            
-            # Session list
-            sessions = filtered_df.groupby('sessionId').agg(
-                agent_name=('agentName', 'first'),
-                latest_timestamp=('timestamp', 'max'),
-                message_count=('timestamp', 'count'),
-                errors=('status', lambda s: (s != 'SUCCESS').sum()),
-                avg_latency=('agentLatency', 'mean'),
-                feedback=('feedbackStatus', lambda s: s.value_counts().to_dict())
-            ).sort_values(by='latest_timestamp', ascending=False)
-            
-            for session_id, data in sessions.iterrows():
-                agent_emoji = "🤖"
-                for agent in registry.get_active_agents():
-                    if agent.agent_name == data['agent_name']:
-                        agent_emoji = agent.avatar_emoji
-                        break
-                
-                summary = (
-                    f"{agent_emoji} **{data['agent_name']}** | "
-                    f"Session: `{session_id}` | "
-                    f"Messages: {data['message_count']} | "
-                    f"Errors: {data['errors']} | "
-                    f"Avg Latency: {data['avg_latency']:.0f}ms | "
-                    f"Last Active: {data['latest_timestamp'].strftime('%Y-%m-%d %H:%M')}"
-                )
-                
-                with st.expander(summary):
-                    session_df = filtered_df[filtered_df['sessionId'] == session_id].sort_values(by='timestamp', ascending=True)
-                    
-                    for idx, row in session_df.iterrows():
-                        col_time, col_content = st.columns([1, 4])
-                        
-                        with col_time:
-                            st.caption(row['timestamp'].strftime('%H:%M:%S'))
-                            st.caption(f"{row['agentLatency']:.0f}ms")
-                            if row['feedbackStatus']:
-                                emoji = "👍" if row['feedbackStatus'] == 'positive' else "👎"
-                                st.caption(f"{emoji} {row['feedbackStatus']}")
-                        
-                        with col_content:
-                            st.markdown(f"**User:** {row['userMessage']}")
-                            st.markdown(f"**Agent:** {row['agentResponse']}")
-                            
-                            if row['status'] != 'SUCCESS':
-                                st.error(f"❌ Error: {row['status']}")
-                        
-                        st.markdown("---")
-        else:
-            st.warning("⚠️ No session data available.")
-    
     elif page == "⚙️ Agent Management":
         st.markdown('<div class="main-header">⚙️ Agent Management</div>', unsafe_allow_html=True)
         st.markdown('<div class="sub-header">Configure and manage AI agents in the enterprise</div>', unsafe_allow_html=True)
@@ -817,24 +801,3 @@ if check_password():
         with tab2:
             st.markdown("### Add New Agent to Registry")
             st.info("🚧 Agent creation interface - Coming soon in production version")
-            
-            with st.form("add_agent_form"):
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    new_agent_id = st.text_input("Agent ID", placeholder="example-ops-agent")
-                    new_agent_name = st.text_input("Agent Name", placeholder="Example")
-                    new_display_name = st.text_input("Display Name", placeholder="Example - Description")
-                    new_agent_type = st.selectbox("Agent Type", ["assistant", "specialist", "coach", "analyst"])
-                    new_department = st.text_input("Department", placeholder="Department Name")
-                
-                with col2:
-                    new_description = st.text_area("Description", placeholder="Agent description...")
-                    new_model = st.selectbox("Model", list(MODEL_PRICING.keys()))
-                    new_avatar = st.text_input("Avatar Emoji", placeholder="🤖")
-                    new_theme_color = st.color_picker("Theme Color", "#3B82F6")
-                
-                submitted = st.form_submit_button("Add Agent")
-                
-                if submitted:
-                    st.info("Agent creation will be implemented in production version")
