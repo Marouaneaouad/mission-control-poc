@@ -61,6 +61,7 @@ st.markdown("""
         border-radius: 4px;
         font-family: monospace;
         font-size: 0.9rem;
+        color: #000000;
     }
     .rationale-tool {
         background-color: #FEF3C7;
@@ -70,6 +71,7 @@ st.markdown("""
         border-radius: 4px;
         font-family: monospace;
         font-size: 0.9rem;
+        color: #000000;
     }
     .rationale-answer {
         background-color: #F0FDF4;
@@ -77,6 +79,7 @@ st.markdown("""
         padding: 0.75rem;
         margin: 0.5rem 0;
         border-radius: 4px;
+        color: #000000;
     }
     .feedback-negative {
         background-color: #FEE2E2;
