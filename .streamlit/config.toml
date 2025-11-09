@@ -1,0 +1,16 @@
+[runner]
+magicEnabled = true
+
+[server]
+enableCORS = false
+enableXsrfProtection = true
+```
+
+3. **Create another file** in the root called `.python-version`:
+```
+3.11
+```
+
+4. **OR create a file** called `runtime.txt` (in the root):
+```
+python-3.11
