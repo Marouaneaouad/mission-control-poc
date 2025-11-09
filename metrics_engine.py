@@ -23,15 +23,30 @@ class MetricsEngine:
         self.registry = get_registry()
     
     def calculate_cost(self, row: pd.Series) -> float:
-        """Calculate cost for a single interaction using dynamic model pricing"""
+        """
+        Calculate cost for a single interaction using dynamic model pricing.
+        CRITICAL: Each query can use a different model, so we calculate cost per row.
+        """
         model_id = row.get('modelId', 'unknown_model_id')
+        
+        # Handle cases where modelId might be missing or empty
+        if pd.isna(model_id) or model_id == '' or model_id is None:
+            model_id = 'unknown_model_id'
+        
+        # Get pricing for this specific model
         pricing = MODEL_PRICING.get(model_id, MODEL_PRICING['unknown_model_id'])
         
         input_tokens = row.get('inputTokens', 0)
         output_tokens = row.get('outputTokens', 0)
         
-        input_cost = (input_tokens / 1_000_000) * pricing['input']
-        output_cost = (output_tokens / 1_000_000) * pricing['output']
+        # Handle NaN values
+        if pd.isna(input_tokens):
+            input_tokens = 0
+        if pd.isna(output_tokens):
+            output_tokens = 0
+        
+        input_cost = (float(input_tokens) / 1_000_000) * pricing['input']
+        output_cost = (float(output_tokens) / 1_000_000) * pricing['output']
         
         return input_cost + output_cost
     
@@ -47,14 +62,18 @@ class MetricsEngine:
         total_queries = len(self.df)
         total_sessions = self.df['sessionId'].nunique()
         
-        # Latency metrics
-        avg_latency_ms = self.df['agentLatency'].mean()
-        p95_latency_ms = self.df['agentLatency'].quantile(0.95)
+        # Latency metrics (convert from ms to seconds)
+        avg_latency_sec = self.df['agentLatency'].mean() / 1000
+        p95_latency_sec = self.df['agentLatency'].quantile(0.95) / 1000
         
-        # Feedback metrics
-        feedback_data = self.df[self.df['feedbackStatus'].notna()]
+        # Feedback metrics - ONLY count positive and negative (exclude empty)
+        feedback_data = self.df[
+            (self.df['feedbackStatus'] == 'positive') | 
+            (self.df['feedbackStatus'] == 'negative')
+        ]
         total_feedback = len(feedback_data)
         positive_feedback = len(feedback_data[feedback_data['feedbackStatus'] == 'positive'])
+        negative_feedback = len(feedback_data[feedback_data['feedbackStatus'] == 'negative'])
         positive_rate = (positive_feedback / total_feedback * 100) if total_feedback > 0 else 0
         
         # Error metrics
@@ -72,7 +91,7 @@ class MetricsEngine:
         # Calculate fleet health score (0-100)
         health_score = self._calculate_fleet_health(
             error_rate=error_rate,
-            avg_latency_ms=avg_latency_ms,
+            avg_latency_sec=avg_latency_sec,
             positive_rate=positive_rate
         )
         
@@ -86,8 +105,8 @@ class MetricsEngine:
             "total_agents": total_agents,
             "total_queries": total_queries,
             "total_sessions": total_sessions,
-            "avg_latency_ms": avg_latency_ms,
-            "p95_latency_ms": p95_latency_ms,
+            "avg_latency_sec": avg_latency_sec,
+            "p95_latency_sec": p95_latency_sec,
             "positive_feedback_rate": positive_rate,
             "total_errors": total_errors,
             "error_rate": error_rate,
@@ -99,7 +118,8 @@ class MetricsEngine:
             "daily_avg_cost": daily_avg_cost,
             "monthly_projection": monthly_projection,
             "total_feedback": total_feedback,
-            "positive_feedback": positive_feedback
+            "positive_feedback": positive_feedback,
+            "negative_feedback": negative_feedback
         }
     
     def get_agent_metrics(self, agent_id: str) -> Dict:
@@ -117,15 +137,18 @@ class MetricsEngine:
         total_queries = len(agent_df)
         total_sessions = agent_df['sessionId'].nunique()
         
-        # Latency metrics
-        avg_latency_ms = agent_df['agentLatency'].mean()
-        p50_latency_ms = agent_df['agentLatency'].quantile(0.50)
-        p90_latency_ms = agent_df['agentLatency'].quantile(0.90)
-        p95_latency_ms = agent_df['agentLatency'].quantile(0.95)
-        p99_latency_ms = agent_df['agentLatency'].quantile(0.99)
+        # Latency metrics (convert from ms to seconds)
+        avg_latency_sec = agent_df['agentLatency'].mean() / 1000
+        p50_latency_sec = agent_df['agentLatency'].quantile(0.50) / 1000
+        p90_latency_sec = agent_df['agentLatency'].quantile(0.90) / 1000
+        p95_latency_sec = agent_df['agentLatency'].quantile(0.95) / 1000
+        p99_latency_sec = agent_df['agentLatency'].quantile(0.99) / 1000
         
-        # Feedback metrics
-        feedback_data = agent_df[agent_df['feedbackStatus'].notna()]
+        # Feedback metrics - ONLY count positive and negative (exclude empty)
+        feedback_data = agent_df[
+            (agent_df['feedbackStatus'] == 'positive') | 
+            (agent_df['feedbackStatus'] == 'negative')
+        ]
         total_feedback = len(feedback_data)
         positive_feedback = len(feedback_data[feedback_data['feedbackStatus'] == 'positive'])
         negative_feedback = len(feedback_data[feedback_data['feedbackStatus'] == 'negative'])
@@ -154,8 +177,9 @@ class MetricsEngine:
         # Session metrics
         avg_messages_per_session = total_queries / total_sessions if total_sessions > 0 else 0
         
-        # SLA compliance
-        sla_latency_compliance = (agent_df['agentLatency'] <= agent_config.target_latency_ms).mean() * 100 if agent_config else 0
+        # SLA compliance (convert target from ms to seconds for comparison)
+        target_latency_sec = agent_config.target_latency_ms / 1000 if agent_config else 5.0
+        sla_latency_compliance = (agent_df['agentLatency'] / 1000 <= target_latency_sec).mean() * 100
         sla_success_compliance = success_rate >= (agent_config.target_success_rate if agent_config else 95)
         
         # Daily metrics for projections
@@ -175,11 +199,11 @@ class MetricsEngine:
             "agent_config": agent_config,
             "total_queries": total_queries,
             "total_sessions": total_sessions,
-            "avg_latency_ms": avg_latency_ms,
-            "p50_latency_ms": p50_latency_ms,
-            "p90_latency_ms": p90_latency_ms,
-            "p95_latency_ms": p95_latency_ms,
-            "p99_latency_ms": p99_latency_ms,
+            "avg_latency_sec": avg_latency_sec,
+            "p50_latency_sec": p50_latency_sec,
+            "p90_latency_sec": p90_latency_sec,
+            "p95_latency_sec": p95_latency_sec,
+            "p99_latency_sec": p99_latency_sec,
             "positive_feedback_rate": positive_rate,
             "total_feedback": total_feedback,
             "positive_feedback": positive_feedback,
@@ -201,7 +225,8 @@ class MetricsEngine:
             "daily_avg_queries": daily_avg_queries,
             "monthly_cost_projection": monthly_cost_projection,
             "cost_threshold_ok": cost_threshold_ok,
-            "days_in_period": days_in_period
+            "days_in_period": days_in_period,
+            "target_latency_sec": target_latency_sec
         }
     
     def get_agent_comparison(self, agent_ids: List[str]) -> pd.DataFrame:
@@ -215,7 +240,7 @@ class MetricsEngine:
             comparison_data.append({
                 "Agent": agent_config.display_name if agent_config else agent_id,
                 "Queries": metrics['total_queries'],
-                "Avg Latency (ms)": round(metrics['avg_latency_ms'], 0),
+                "Avg Latency (s)": round(metrics['avg_latency_sec'], 2),
                 "Success Rate (%)": round(metrics['success_rate'], 1),
                 "Positive Feedback (%)": round(metrics['positive_feedback_rate'], 1),
                 "Total Cost ($)": round(metrics['total_cost'], 2),
@@ -261,13 +286,13 @@ class MetricsEngine:
         daily = self.df.groupby('date').agg({
             'interaction_id': 'count',
             'cost': 'sum',
-            'agentLatency': 'mean',
+            'agentLatency': lambda x: x.mean() / 1000,  # Convert to seconds
             'inputTokens': 'sum',
             'outputTokens': 'sum',
             'status': lambda x: (x != 'SUCCESS').sum()
         }).reset_index()
         
-        daily.columns = ['date', 'queries', 'cost', 'avg_latency_ms', 'input_tokens', 'output_tokens', 'errors']
+        daily.columns = ['date', 'queries', 'cost', 'avg_latency_sec', 'input_tokens', 'output_tokens', 'errors']
         daily['error_rate'] = (daily['errors'] / daily['queries'] * 100)
         
         return daily
@@ -285,13 +310,13 @@ class MetricsEngine:
         daily = agent_df.groupby('date').agg({
             'interaction_id': 'count',
             'cost': 'sum',
-            'agentLatency': 'mean',
+            'agentLatency': lambda x: x.mean() / 1000,  # Convert to seconds
             'inputTokens': 'sum',
             'outputTokens': 'sum',
             'status': lambda x: (x != 'SUCCESS').sum()
         }).reset_index()
         
-        daily.columns = ['date', 'queries', 'cost', 'avg_latency_ms', 'input_tokens', 'output_tokens', 'errors']
+        daily.columns = ['date', 'queries', 'cost', 'avg_latency_sec', 'input_tokens', 'output_tokens', 'errors']
         daily['error_rate'] = (daily['errors'] / daily['queries'] * 100)
         
         return daily
@@ -308,18 +333,19 @@ class MetricsEngine:
         if agent_df.empty:
             return anomalies
         
-        # Latency anomalies (>2 standard deviations from mean)
-        latency_mean = agent_df['agentLatency'].mean()
-        latency_std = agent_df['agentLatency'].std()
+        # Latency anomalies (>2 standard deviations from mean) - convert to seconds
+        latency_sec = agent_df['agentLatency'] / 1000
+        latency_mean = latency_sec.mean()
+        latency_std = latency_sec.std()
         latency_threshold = latency_mean + (2 * latency_std)
         
-        latency_anomalies = agent_df[agent_df['agentLatency'] > latency_threshold]
+        latency_anomalies = latency_sec[latency_sec > latency_threshold]
         if len(latency_anomalies) > 0:
             anomalies.append({
                 "type": "latency_spike",
                 "severity": "warning",
                 "count": len(latency_anomalies),
-                "message": f"{len(latency_anomalies)} queries exceeded latency threshold ({latency_threshold:.0f}ms)"
+                "message": f"{len(latency_anomalies)} queries exceeded latency threshold ({latency_threshold:.2f}s)"
             })
         
         # Error rate anomalies
@@ -355,13 +381,14 @@ class MetricsEngine:
         
         return anomalies
     
-    def _calculate_fleet_health(self, error_rate: float, avg_latency_ms: float, positive_rate: float) -> float:
+    def _calculate_fleet_health(self, error_rate: float, avg_latency_sec: float, positive_rate: float) -> float:
         """Calculate overall fleet health score (0-100)"""
         # Error rate component (0-40 points) - lower is better
         error_score = max(0, 40 - (error_rate * 4))
         
         # Latency component (0-30 points) - lower is better
-        latency_score = max(0, 30 - (avg_latency_ms / 200))
+        # Target: under 5 seconds gets full points
+        latency_score = max(0, 30 - (avg_latency_sec * 6))
         
         # Feedback component (0-30 points) - higher is better
         feedback_score = (positive_rate / 100) * 30
@@ -374,8 +401,8 @@ class MetricsEngine:
             "total_agents": 0,
             "total_queries": 0,
             "total_sessions": 0,
-            "avg_latency_ms": 0,
-            "p95_latency_ms": 0,
+            "avg_latency_sec": 0,
+            "p95_latency_sec": 0,
             "positive_feedback_rate": 0,
             "total_errors": 0,
             "error_rate": 0,
@@ -387,21 +414,25 @@ class MetricsEngine:
             "daily_avg_cost": 0,
             "monthly_projection": 0,
             "total_feedback": 0,
-            "positive_feedback": 0
+            "positive_feedback": 0,
+            "negative_feedback": 0
         }
     
     def _empty_agent_metrics(self, agent_id: str) -> Dict:
         """Return empty agent metrics"""
+        agent_config = self.registry.get_agent(agent_id)
+        target_latency_sec = agent_config.target_latency_ms / 1000 if agent_config else 5.0
+        
         return {
             "agent_id": agent_id,
-            "agent_config": self.registry.get_agent(agent_id),
+            "agent_config": agent_config,
             "total_queries": 0,
             "total_sessions": 0,
-            "avg_latency_ms": 0,
-            "p50_latency_ms": 0,
-            "p90_latency_ms": 0,
-            "p95_latency_ms": 0,
-            "p99_latency_ms": 0,
+            "avg_latency_sec": 0,
+            "p50_latency_sec": 0,
+            "p90_latency_sec": 0,
+            "p95_latency_sec": 0,
+            "p99_latency_sec": 0,
             "positive_feedback_rate": 0,
             "total_feedback": 0,
             "positive_feedback": 0,
@@ -423,5 +454,6 @@ class MetricsEngine:
             "daily_avg_queries": 0,
             "monthly_cost_projection": 0,
             "cost_threshold_ok": True,
-            "days_in_period": 0
+            "days_in_period": 0,
+            "target_latency_sec": target_latency_sec
         }
