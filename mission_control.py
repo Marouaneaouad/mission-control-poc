@@ -645,6 +645,128 @@ if check_password():
             else:
                 st.success("✅ No anomalies detected for this agent.")
     
+    
+    elif page == "🔬 Session Explorer":
+        st.markdown('<div class="main-header">🔬 Session Explorer</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sub-header">Deep dive into individual sessions and conversations</div>', unsafe_allow_html=True)
+        
+        if not log_df.empty:
+            # Filter options
+            col_filter1, col_filter2, col_filter3 = st.columns(3)
+            
+            with col_filter1:
+                agent_filter = st.multiselect(
+                    "Filter by Agent",
+                    options=log_df['agent_id'].unique(),
+                    default=list(log_df['agent_id'].unique())
+                )
+            
+            with col_filter2:
+                feedback_filter = st.selectbox(
+                    "Filter by Feedback",
+                    options=["All", "Positive", "Negative", "No Feedback"],
+                    index=0
+                )
+            
+            with col_filter3:
+                status_filter = st.selectbox(
+                    "Filter by Status",
+                    options=["All", "SUCCESS", "ERROR"],
+                    index=0
+                )
+            
+            # Apply filters
+            filtered_df = log_df[log_df['agent_id'].isin(agent_filter)].copy()
+            
+            if feedback_filter == "Positive":
+                filtered_df = filtered_df[filtered_df['feedbackStatus'] == 'positive']
+            elif feedback_filter == "Negative":
+                filtered_df = filtered_df[filtered_df['feedbackStatus'] == 'negative']
+            elif feedback_filter == "No Feedback":
+                filtered_df = filtered_df[filtered_df['feedbackStatus'] == '']
+            
+            if status_filter != "All":
+                filtered_df = filtered_df[filtered_df['status'] == status_filter]
+            
+            st.markdown(f"**Showing {len(filtered_df)} interactions across {filtered_df['sessionId'].nunique()} sessions**")
+            
+            st.markdown("---")
+            
+            # Session list
+            if not filtered_df.empty:
+                sessions = filtered_df.groupby('sessionId').agg(
+                    agent_name=('agentName', 'first'),
+                    latest_timestamp=('timestamp', 'max'),
+                    message_count=('timestamp', 'count'),
+                    errors=('status', lambda s: (s != 'SUCCESS').sum()),
+                    avg_latency=('agentLatency', lambda x: x.mean() / 1000),
+                    feedback=('feedbackStatus', lambda s: s.value_counts().to_dict())
+                ).sort_values(by='latest_timestamp', ascending=False)
+                
+                for session_id, data in sessions.iterrows():
+                    agent_emoji = "🤖"
+                    for agent in registry.get_active_agents():
+                        if agent.agent_name == data['agent_name']:
+                            agent_emoji = agent.avatar_emoji
+                            break
+                    
+                    summary = (
+                        f"{agent_emoji} **{data['agent_name']}** | "
+                        f"Session: `{session_id}` | "
+                        f"Messages: {data['message_count']} | "
+                        f"Errors: {data['errors']} | "
+                        f"Avg Latency: {data['avg_latency']:.2f}s | "
+                        f"Last Active: {data['latest_timestamp'].strftime('%Y-%m-%d %H:%M')}"
+                    )
+                    
+                    with st.expander(summary):
+                        session_df = filtered_df[filtered_df['sessionId'] == session_id].sort_values(by='timestamp', ascending=True)
+                        
+                        for idx, row in session_df.iterrows():
+                            col_time, col_content = st.columns([1, 4])
+                            
+                            with col_time:
+                                st.caption(row['timestamp'].strftime('%H:%M:%S'))
+                                st.caption(f"{row['agentLatency']/1000:.2f}s")
+                                if row['feedbackStatus']:
+                                    emoji = "👍" if row['feedbackStatus'] == 'positive' else "👎"
+                                    st.caption(f"{emoji} {row['feedbackStatus']}")
+                            
+                            with col_content:
+                                st.markdown(f"**👤 User:** {row['userMessage']}")
+                                st.markdown(f"**🤖 Agent:** {row['agentResponse']}")
+                                
+                                # CRITICAL: Show negative feedback reason
+                                if row['feedbackStatus'] == 'negative' and row['feedbackReason'] and row['feedbackReason'] != '':
+                                    st.markdown(f'<div class="feedback-negative">❌ Feedback Reason: {row["feedbackReason"]}</div>', unsafe_allow_html=True)
+                                
+                                # INNOVATIVE: Parse and display agent rationale
+                                if row['agentRationale'] and row['agentRationale'] != '':
+                                    with st.expander("🧠 View Agent Reasoning"):
+                                        rationale_steps = parse_agent_rationale(row['agentRationale'])
+                                        
+                                        if rationale_steps:
+                                            for step in rationale_steps:
+                                                if step['type'] == 'thinking':
+                                                    st.markdown(f'<div class="rationale-thinking">💭 **Thinking:** {step["content"]}</div>', unsafe_allow_html=True)
+                                                elif step['type'] == 'tool_call':
+                                                    st.markdown(f'<div class="rationale-tool">🔧 **{step["content"]}**</div>', unsafe_allow_html=True)
+                                                elif step['type'] == 'tool_result':
+                                                    st.markdown(f'<div class="rationale-tool">📊 **Result:** {step["content"]}</div>', unsafe_allow_html=True)
+                                                elif step['type'] == 'answer':
+                                                    st.markdown(f'<div class="rationale-answer">✅ **Answer:** {step["content"]}</div>', unsafe_allow_html=True)
+                                        else:
+                                            # Fallback: show raw rationale
+                                            st.text(row['agentRationale'][:500])
+                                
+                                if row['status'] != 'SUCCESS':
+                                    st.error(f"❌ Error: {row['status']}")
+                            
+                            st.markdown("---")
+            else:
+                st.info("No sessions match the selected filters.")
+        else:
+            st.warning("⚠️ No session data available.")
     elif page == "💰 Cost Analytics":
         st.markdown('<div class="main-header">💰 Cost Analytics</div>', unsafe_allow_html=True)
         st.markdown('<div class="sub-header">Comprehensive cost tracking with dynamic per-query model-based calculation</div>', unsafe_allow_html=True)
