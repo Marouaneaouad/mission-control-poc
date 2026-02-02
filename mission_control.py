@@ -275,9 +275,16 @@ def fetch_dynamodb_data(_dynamodb, table_name, days=None):
             if df[col].dtype == 'object':
                 df[col] = df[col].apply(lambda x: float(x) if isinstance(x, Decimal) else x)
         
-        # Ensure timestamp is datetime
+        # Ensure timestamp is datetime - let pandas infer format
         if 'timestamp' in df.columns:
-            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            # Parse timestamps without strict format requirements
+            df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
+            
+            # Make timezone-aware (convert naive timestamps to UTC)
+            if df['timestamp'].dt.tz is None:
+                df['timestamp'] = df['timestamp'].dt.tz_localize('UTC')
+            else:
+                df['timestamp'] = df['timestamp'].dt.tz_convert('UTC')
         
         # Fill missing values
         df['feedbackStatus'] = df['feedbackStatus'].fillna('') if 'feedbackStatus' in df.columns else ''
