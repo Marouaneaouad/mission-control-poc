@@ -202,11 +202,11 @@ def get_dynamodb_resource(access_key, secret_key, region):
 
 # --- FIXED: Data Fetching with better error handling and debugging ---
 @st.cache_data(ttl=300)  # 5 minutes cache
-def fetch_dynamodb_data(_dynamodb, table_name, days=7):
-    """Fetch data from DynamoDB with improved error handling"""
+def fetch_dynamodb_data(_dynamodb, table_name, days=None):
+    """Fetch data from DynamoDB with improved error handling - ALL TIME if days=None"""
     debug_info = {
         'table_name': table_name,
-        'days_requested': days,
+        'days_requested': days if days else 'ALL TIME',
         'error': None,
         'items_found': 0,
         'scan_count': 0
@@ -227,22 +227,20 @@ def fetch_dynamodb_data(_dynamodb, table_name, days=7):
             debug_info['error'] = f"Table does not exist or cannot be accessed: {str(e)}"
             return pd.DataFrame(), debug_info
         
-        cutoff_time = datetime.now(timezone.utc) - timedelta(days=days)
-        cutoff_time_str = cutoff_time.isoformat()
-        debug_info['cutoff_time'] = cutoff_time_str
-        
-        # First, do a limited scan to check if table has ANY data
-        test_response = table.scan(Limit=10)
-        debug_info['total_items_in_table'] = test_response.get('Count', 0)
-        
-        if test_response.get('Count', 0) == 0:
-            debug_info['error'] = "Table is empty - no items found"
-            return pd.DataFrame(), debug_info
-        
-        # Now scan with time filter
-        response = table.scan(
-            FilterExpression=Attr('timestamp').gte(cutoff_time_str)
-        )
+        # If days is None or very large, get ALL data without time filter
+        if days is None or days >= 365:
+            debug_info['filter_type'] = 'NO TIME FILTER - ALL DATA'
+            response = table.scan()
+        else:
+            # Apply time filter for specific days
+            cutoff_time = datetime.now(timezone.utc) - timedelta(days=days)
+            cutoff_time_str = cutoff_time.isoformat()
+            debug_info['cutoff_time'] = cutoff_time_str
+            debug_info['filter_type'] = f'FILTERED - Last {days} days'
+            
+            response = table.scan(
+                FilterExpression=Attr('timestamp').gte(cutoff_time_str)
+            )
         
         items = response.get('Items', [])
         debug_info['scan_count'] = 1
@@ -250,16 +248,21 @@ def fetch_dynamodb_data(_dynamodb, table_name, days=7):
         
         # Handle pagination
         while 'LastEvaluatedKey' in response:
-            response = table.scan(
-                FilterExpression=Attr('timestamp').gte(cutoff_time_str),
-                ExclusiveStartKey=response['LastEvaluatedKey']
-            )
+            if days is None or days >= 365:
+                response = table.scan(
+                    ExclusiveStartKey=response['LastEvaluatedKey']
+                )
+            else:
+                response = table.scan(
+                    FilterExpression=Attr('timestamp').gte(cutoff_time_str),
+                    ExclusiveStartKey=response['LastEvaluatedKey']
+                )
             items.extend(response.get('Items', []))
             debug_info['scan_count'] += 1
             debug_info['items_found'] = len(items)
         
         if not items:
-            debug_info['error'] = f"No items found within last {days} days (found {test_response.get('Count', 0)} total items in table)"
+            debug_info['error'] = f"No items found in table"
             return pd.DataFrame(), debug_info
         
         df = pd.DataFrame(items)
@@ -309,6 +312,26 @@ if check_password():
     st.sidebar.markdown("# 🎯 Mission Control")
     st.sidebar.markdown("---")
     
+    # Time range selector
+    st.sidebar.markdown("### 📅 Time Range")
+    time_range = st.sidebar.selectbox(
+        "Select data range",
+        options=["All Time", "Last 7 Days", "Last 30 Days", "Last 90 Days", "Last 365 Days"],
+        index=0  # Default to "All Time"
+    )
+    
+    # Map selection to days parameter
+    days_map = {
+        "All Time": None,
+        "Last 7 Days": 7,
+        "Last 30 Days": 30,
+        "Last 90 Days": 90,
+        "Last 365 Days": 365
+    }
+    selected_days = days_map[time_range]
+    
+    st.sidebar.markdown("---")
+    
     # Add debug toggle in sidebar
     show_debug = st.sidebar.checkbox("🐛 Show Debug Info", value=False)
     
@@ -327,9 +350,10 @@ if check_password():
     st.sidebar.markdown("---")
     st.sidebar.markdown("### ⚡ Quick Stats")
     
-    # Fetch data with debug info
-    with st.spinner("Loading data..."):
-        log_df, debug_info = fetch_dynamodb_data(dynamodb, DYNAMODB_TABLE_NAME, days=7)
+    # Fetch data with debug info - using selected time range
+    loading_msg = f"Loading {time_range.lower()} data..." if selected_days else "Loading all-time data..."
+    with st.spinner(loading_msg):
+        log_df, debug_info = fetch_dynamodb_data(dynamodb, DYNAMODB_TABLE_NAME, days=selected_days)
     
     # Show debug information if enabled
     if show_debug:
@@ -346,7 +370,7 @@ if check_password():
         fleet_metrics = metrics_engine.get_fleet_metrics()
         
         st.sidebar.metric("Active Agents", fleet_metrics['total_agents'])
-        st.sidebar.metric("Total Queries (7d)", f"{fleet_metrics['total_queries']:,}")
+        st.sidebar.metric("Total Queries", f"{fleet_metrics['total_queries']:,}")
         st.sidebar.metric("Fleet Health", f"{fleet_metrics['health_score']:.0f}%")
         st.sidebar.metric("Est. Monthly Cost", f"${fleet_metrics['monthly_projection']:.2f}")
     
@@ -363,13 +387,13 @@ if check_password():
         **Troubleshooting Steps:**
         1. **Check DynamoDB Table:** Verify table `{DYNAMODB_TABLE_NAME}` exists and has data
         2. **Check AWS Credentials:** Ensure your AWS credentials have DynamoDB read permissions
-        3. **Check Time Filter:** Currently filtering for last {debug_info.get('days_requested', 7)} days
-        4. **Table Info:** Found {debug_info.get('total_items_in_table', 0)} total items in table
+        3. **Data Scope:** Fetching ALL TIME data (no date filter applied)
+        4. **Filter Type:** {debug_info.get('filter_type', 'Unknown')}
         
         **Quick Fixes:**
-        - Try increasing the time window (modify `days` parameter in code)
         - Check if data exists in DynamoDB console
-        - Verify timestamp format in your data matches ISO format
+        - Verify AWS credentials are correct
+        - Check table name is correct: `{DYNAMODB_TABLE_NAME}`
         """)
         
         if show_debug and debug_info.get('traceback'):
@@ -384,12 +408,16 @@ if check_password():
         st.markdown('<div class="sub-header">Enterprise-wide AI agent observability and performance monitoring</div>', unsafe_allow_html=True)
         
         # Show data freshness indicator
-        col_fresh1, col_fresh2 = st.columns([3, 1])
+        col_fresh1, col_fresh2, col_fresh3 = st.columns([2, 1, 1])
         with col_fresh1:
-            st.success(f"✅ Data loaded successfully - {len(log_df):,} records from last 7 days")
+            range_text = time_range.lower() if selected_days else "all-time"
+            st.success(f"✅ Data loaded successfully - {len(log_df):,} total records ({range_text})")
         with col_fresh2:
             oldest_record = log_df['timestamp'].min()
             st.caption(f"Oldest: {oldest_record.strftime('%Y-%m-%d')}")
+        with col_fresh3:
+            newest_record = log_df['timestamp'].max()
+            st.caption(f"Newest: {newest_record.strftime('%Y-%m-%d')}")
         
         metrics_engine = MetricsEngine(log_df)
         fleet_metrics = metrics_engine.get_fleet_metrics()
@@ -437,9 +465,12 @@ if check_password():
             st.metric("Total Sessions", f"{fleet_metrics['total_sessions']:,}")
         
         with col2:
-            st.metric("Total Queries (7d)", f"{fleet_metrics['total_queries']:,}")
-            daily_avg = fleet_metrics['total_queries'] / 7
-            st.caption(f"~{daily_avg:.0f} queries/day")
+            st.metric("Total Queries", f"{fleet_metrics['total_queries']:,}")
+            # Calculate average based on actual data timespan
+            if len(log_df) > 0:
+                days_span = (log_df['timestamp'].max() - log_df['timestamp'].min()).days + 1
+                daily_avg = fleet_metrics['total_queries'] / max(days_span, 1)
+                st.caption(f"~{daily_avg:.0f} queries/day avg")
         
         with col3:
             st.metric("Avg Response Time", f"{fleet_metrics['avg_latency_sec']:.2f}s")
@@ -458,17 +489,22 @@ if check_password():
         # Cost Overview
         st.markdown("### 💰 Cost Overview")
         
+        # Calculate actual timespan
+        days_span = (log_df['timestamp'].max() - log_df['timestamp'].min()).days + 1
+        
         col_cost1, col_cost2, col_cost3, col_cost4 = st.columns(4)
         
         with col_cost1:
-            st.metric("Total Cost (7d)", f"${fleet_metrics['total_cost']:.2f}")
+            range_label = time_range if selected_days else "All Time"
+            st.metric(f"Total Cost ({range_label})", f"${fleet_metrics['total_cost']:.2f}")
+            st.caption(f"Over {days_span} days")
         
         with col_cost2:
             st.metric("Daily Average", f"${fleet_metrics['daily_avg_cost']:.2f}")
         
         with col_cost3:
             st.metric("Monthly Projection", f"${fleet_metrics['monthly_projection']:.2f}")
-            st.caption("Based on current usage")
+            st.caption("Based on daily average")
         
         with col_cost4:
             st.metric("Cost per Query", f"${fleet_metrics['avg_cost_per_query']:.4f}")
@@ -545,7 +581,7 @@ if check_password():
                         st.metric("Feedback", f"{agent_metrics['positive_feedback_rate']:.1f}%")
                     
                     with m5:
-                        st.metric("Cost (7d)", f"${agent_metrics['total_cost']:.2f}")
+                        st.metric("Total Cost", f"${agent_metrics['total_cost']:.2f}")
                 
                 st.markdown("---")
         
