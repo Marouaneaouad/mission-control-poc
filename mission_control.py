@@ -1,5 +1,5 @@
 """
-Enterprise AI Observability Platform - Mission Control (FIXED)
+Enterprise AI Observability Platform - Mission Control
 Multi-agent observability and management platform for Ellucian
 """
 
@@ -53,6 +53,14 @@ st.markdown("""
         font-size: 0.875rem;
         font-weight: 600;
     }
+    .status-maintenance {
+        background-color: #F59E0B;
+        color: white;
+        padding: 0.25rem 0.75rem;
+        border-radius: 12px;
+        font-size: 0.875rem;
+        font-weight: 600;
+    }
     .rationale-thinking {
         background-color: #F0F9FF;
         border-left: 4px solid #3B82F6;
@@ -88,14 +96,6 @@ st.markdown("""
         margin: 0.5rem 0;
         border-radius: 4px;
         font-weight: 600;
-    }
-    .debug-info {
-        background-color: #F3F4F6;
-        border: 1px solid #D1D5DB;
-        padding: 1rem;
-        border-radius: 8px;
-        font-family: monospace;
-        font-size: 0.85rem;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -200,13 +200,16 @@ def get_dynamodb_resource(access_key, secret_key, region):
         st.error(f"Error initializing DynamoDB resource: {e}")
         return None
 
-# --- FIXED: Data Fetching with better error handling and debugging ---
+# --- FIXED: Data Fetching with ALL TIME support ---
 @st.cache_data(ttl=300)  # 5 minutes cache
 def fetch_dynamodb_data(_dynamodb, table_name, days=None):
-    """Fetch data from DynamoDB with improved error handling - ALL TIME if days=None"""
+    """
+    Fetch data from DynamoDB with optional time filtering
+    days=None means fetch ALL TIME data
+    """
     debug_info = {
         'table_name': table_name,
-        'days_requested': days if days else 'ALL TIME',
+        'days_requested': 'ALL TIME' if days is None else days,
         'error': None,
         'items_found': 0,
         'scan_count': 0
@@ -227,8 +230,8 @@ def fetch_dynamodb_data(_dynamodb, table_name, days=None):
             debug_info['error'] = f"Table does not exist or cannot be accessed: {str(e)}"
             return pd.DataFrame(), debug_info
         
-        # If days is None or very large, get ALL data without time filter
-        if days is None or days >= 365:
+        # If days is None, get ALL data without time filter
+        if days is None:
             debug_info['filter_type'] = 'NO TIME FILTER - ALL DATA'
             response = table.scan()
         else:
@@ -248,7 +251,7 @@ def fetch_dynamodb_data(_dynamodb, table_name, days=None):
         
         # Handle pagination
         while 'LastEvaluatedKey' in response:
-            if days is None or days >= 365:
+            if days is None:
                 response = table.scan(
                     ExclusiveStartKey=response['LastEvaluatedKey']
                 )
@@ -286,6 +289,7 @@ def fetch_dynamodb_data(_dynamodb, table_name, days=None):
         
         debug_info['columns_found'] = list(df.columns)
         debug_info['final_row_count'] = len(df)
+        debug_info['date_range'] = f"{df['timestamp'].min()} to {df['timestamp'].max()}"
         
         return df, debug_info
         
@@ -350,7 +354,7 @@ if check_password():
     st.sidebar.markdown("---")
     st.sidebar.markdown("### ⚡ Quick Stats")
     
-    # Fetch data with debug info - using selected time range
+    # Fetch data with selected time range
     loading_msg = f"Loading {time_range.lower()} data..." if selected_days else "Loading all-time data..."
     with st.spinner(loading_msg):
         log_df, debug_info = fetch_dynamodb_data(dynamodb, DYNAMODB_TABLE_NAME, days=selected_days)
@@ -387,12 +391,13 @@ if check_password():
         **Troubleshooting Steps:**
         1. **Check DynamoDB Table:** Verify table `{DYNAMODB_TABLE_NAME}` exists and has data
         2. **Check AWS Credentials:** Ensure your AWS credentials have DynamoDB read permissions
-        3. **Data Scope:** Fetching ALL TIME data (no date filter applied)
-        4. **Filter Type:** {debug_info.get('filter_type', 'Unknown')}
+        3. **Data Scope:** {debug_info.get('filter_type', 'Unknown')}
+        4. **Time Range Selected:** {time_range}
         
         **Quick Fixes:**
         - Check if data exists in DynamoDB console
         - Verify AWS credentials are correct
+        - Try selecting "All Time" from the time range dropdown
         - Check table name is correct: `{DYNAMODB_TABLE_NAME}`
         """)
         
@@ -596,15 +601,476 @@ if check_password():
         else:
             st.success("✅ No anomalies detected. All systems operating normally.")
     
-    # ... (rest of the pages remain the same)
     elif page == "🤖 Agent Fleet":
-        st.info("Agent Fleet page - implementation continues as in original code...")
+        st.markdown('<div class="main-header">🤖 Agent Fleet Management</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sub-header">Detailed performance analytics for each AI agent</div>', unsafe_allow_html=True)
+        
+        # Agent selector
+        active_agents = registry.get_active_agents()
+        agent_options = {agent.display_name: agent.agent_id for agent in active_agents}
+        
+        selected_agent_name = st.selectbox(
+            "Select Agent for Deep Dive",
+            options=list(agent_options.keys())
+        )
+        
+        selected_agent_id = agent_options[selected_agent_name]
+        agent_config = registry.get_agent(selected_agent_id)
+        
+        if not log_df.empty:
+            metrics_engine = MetricsEngine(log_df)
+            agent_metrics = metrics_engine.get_agent_metrics(selected_agent_id)
+            
+            # Agent Header
+            col_header1, col_header2 = st.columns([1, 4])
+            
+            with col_header1:
+                st.markdown(f"<div style='font-size: 5rem; text-align: center;'>{agent_config.avatar_emoji}</div>", unsafe_allow_html=True)
+            
+            with col_header2:
+                st.markdown(f"## {agent_config.display_name}")
+                st.markdown(f"**Type:** {agent_config.agent_type.title()} | **Department:** {agent_config.department}")
+                st.markdown(f'<span class="status-active">ACTIVE</span>', unsafe_allow_html=True)
+                st.caption(agent_config.description)
+            
+            st.markdown("---")
+            
+            # Key Metrics
+            st.markdown("### 📊 Key Performance Indicators")
+            
+            col1, col2, col3, col4, col5 = st.columns(5)
+            
+            with col1:
+                st.metric("Total Queries", f"{agent_metrics['total_queries']:,}")
+                st.metric("Sessions", f"{agent_metrics['total_sessions']:,}")
+            
+            with col2:
+                st.metric("Avg Latency", f"{agent_metrics['avg_latency_sec']:.2f}s")
+                sla_compliance = agent_metrics['sla_latency_compliance']
+                st.caption(f"SLA Compliance: {sla_compliance:.1f}%")
+            
+            with col3:
+                st.metric("Success Rate", f"{agent_metrics['success_rate']:.1f}%")
+                st.caption(f"{agent_metrics['total_errors']} errors")
+            
+            with col4:
+                st.metric("Positive Feedback", f"{agent_metrics['positive_feedback_rate']:.1f}%")
+                st.caption(f"{agent_metrics['positive_feedback']}/{agent_metrics['total_feedback']} rated")
+            
+            with col5:
+                st.metric("Total Cost", f"${agent_metrics['total_cost']:.2f}")
+                st.caption(f"${agent_metrics['avg_cost_per_query']:.4f}/query")
+            
+            st.markdown("---")
+            
+            # Latency Deep Dive
+            col_lat1, col_lat2 = st.columns([2, 1])
+            
+            with col_lat1:
+                st.markdown("### ⏱️ Latency Distribution")
+                
+                agent_df = log_df[log_df['agent_id'] == selected_agent_id].copy()
+                agent_df['agentLatency_sec'] = agent_df['agentLatency'] / 1000
+                
+                fig = px.histogram(
+                    agent_df, 
+                    x='agentLatency_sec',
+                    nbins=50,
+                    title='',
+                    labels={'agentLatency_sec': 'Latency (seconds)', 'count': 'Frequency'},
+                    color_discrete_sequence=['#3B82F6']
+                )
+                fig.add_vline(
+                    x=agent_metrics['p95_latency_sec'], 
+                    line_dash="dash", 
+                    line_color="red",
+                    annotation_text="P95"
+                )
+                fig.update_layout(height=350, showlegend=False)
+                st.plotly_chart(fig, use_container_width=True)
+            
+            with col_lat2:
+                st.markdown("### 📏 Percentiles")
+                st.metric("P50 (Median)", f"{agent_metrics['p50_latency_sec']:.2f}s")
+                st.metric("P90", f"{agent_metrics['p90_latency_sec']:.2f}s")
+                st.metric("P95", f"{agent_metrics['p95_latency_sec']:.2f}s")
+                st.metric("P99", f"{agent_metrics['p99_latency_sec']:.2f}s")
+                
+                st.markdown("---")
+                st.caption(f"**SLA Target:** {agent_metrics['target_latency_sec']:.2f}s")
+                st.caption(f"**Compliance:** {agent_metrics['sla_latency_compliance']:.1f}%")
+            
+            st.markdown("---")
+            
+            # Usage Patterns & Cost Trends
+            col_usage, col_cost = st.columns(2)
+            
+            with col_usage:
+                st.markdown("### 📅 Daily Query Volume")
+                daily_metrics = metrics_engine.get_agent_daily_metrics(selected_agent_id)
+                
+                if not daily_metrics.empty:
+                    daily_metrics['date_str'] = pd.to_datetime(daily_metrics['date']).dt.strftime('%b %d')
+                    
+                    fig = px.line(
+                        daily_metrics,
+                        x='date_str',
+                        y='queries',
+                        title='',
+                        labels={'date_str': 'Date', 'queries': 'Queries'},
+                        markers=True
+                    )
+                    fig.update_traces(line_color='#3B82F6', marker=dict(size=8))
+                    fig.update_layout(height=300)
+                    st.plotly_chart(fig, use_container_width=True)
+            
+            with col_cost:
+                st.markdown("### 💵 Daily Cost Trend")
+                
+                if not daily_metrics.empty:
+                    fig = px.line(
+                        daily_metrics,
+                        x='date_str',
+                        y='cost',
+                        title='',
+                        labels={'date_str': 'Date', 'cost': 'Cost ($)'},
+                        markers=True
+                    )
+                    fig.update_traces(line_color='#10B981', marker=dict(size=8))
+                    fig.update_layout(height=300)
+                    
+                    if agent_config.daily_cost_threshold:
+                        fig.add_hline(
+                            y=agent_config.daily_cost_threshold,
+                            line_dash="dash",
+                            line_color="red",
+                            annotation_text="Daily Threshold"
+                        )
+                    
+                    st.plotly_chart(fig, use_container_width=True)
+            
+            st.markdown("---")
+            
+            # Feedback Analysis
+            st.markdown("### 💬 Feedback Analysis")
+            
+            agent_df = log_df[log_df['agent_id'] == selected_agent_id]
+            negative_feedback_df = agent_df[
+                (agent_df['feedbackStatus'] == 'negative') & 
+                (agent_df['feedbackReason'] != '') &
+                (agent_df['feedbackReason'].notna())
+            ]
+            
+            if not negative_feedback_df.empty:
+                reason_counts = negative_feedback_df['feedbackReason'].value_counts().reset_index()
+                reason_counts.columns = ['Reason', 'Count']
+                
+                fig = px.bar(
+                    reason_counts,
+                    x='Count',
+                    y='Reason',
+                    orientation='h',
+                    title='Top Negative Feedback Drivers',
+                    color='Count',
+                    color_continuous_scale='Reds'
+                )
+                fig.update_layout(height=300, showlegend=False)
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("✅ No negative feedback recorded for this agent.")
+            
+            # Anomalies for this agent
+            st.markdown("### 🚨 Anomaly Detection")
+            agent_anomalies = metrics_engine.detect_anomalies(agent_id=selected_agent_id)
+            
+            if agent_anomalies:
+                for anomaly in agent_anomalies:
+                    severity_emoji = "⚠️" if anomaly['severity'] == "warning" else "🔴"
+                    st.warning(f"{severity_emoji} **{anomaly['type'].replace('_', ' ').title()}**: {anomaly['message']}")
+            else:
+                st.success("✅ No anomalies detected for this agent.")
     
-    elif page == "💰 Cost Analytics":
-        st.info("Cost Analytics page - implementation continues as in original code...")
     
     elif page == "🔬 Session Explorer":
-        st.info("Session Explorer page - implementation continues as in original code...")
+        st.markdown('<div class="main-header">🔬 Session Explorer</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sub-header">Deep dive into individual sessions and conversations</div>', unsafe_allow_html=True)
+        
+        if not log_df.empty:
+            # Filter options
+            col_filter1, col_filter2, col_filter3 = st.columns(3)
+            
+            with col_filter1:
+                agent_filter = st.multiselect(
+                    "Filter by Agent",
+                    options=log_df['agent_id'].unique(),
+                    default=list(log_df['agent_id'].unique())
+                )
+            
+            with col_filter2:
+                feedback_filter = st.selectbox(
+                    "Filter by Feedback",
+                    options=["All", "Positive", "Negative", "No Feedback"],
+                    index=0
+                )
+            
+            with col_filter3:
+                status_filter = st.selectbox(
+                    "Filter by Status",
+                    options=["All", "SUCCESS", "ERROR"],
+                    index=0
+                )
+            
+            # Apply filters
+            filtered_df = log_df[log_df['agent_id'].isin(agent_filter)].copy()
+            
+            if feedback_filter == "Positive":
+                filtered_df = filtered_df[filtered_df['feedbackStatus'] == 'positive']
+            elif feedback_filter == "Negative":
+                filtered_df = filtered_df[filtered_df['feedbackStatus'] == 'negative']
+            elif feedback_filter == "No Feedback":
+                filtered_df = filtered_df[filtered_df['feedbackStatus'] == '']
+            
+            if status_filter != "All":
+                filtered_df = filtered_df[filtered_df['status'] == status_filter]
+            
+            st.markdown(f"**Showing {len(filtered_df)} interactions across {filtered_df['sessionId'].nunique()} sessions**")
+            
+            st.markdown("---")
+            
+            # Session list
+            if not filtered_df.empty:
+                sessions = filtered_df.groupby('sessionId').agg(
+                    agent_name=('agentName', 'first'),
+                    latest_timestamp=('timestamp', 'max'),
+                    message_count=('timestamp', 'count'),
+                    errors=('status', lambda s: (s != 'SUCCESS').sum()),
+                    avg_latency=('agentLatency', lambda x: x.mean() / 1000),
+                    feedback=('feedbackStatus', lambda s: s.value_counts().to_dict())
+                ).sort_values(by='latest_timestamp', ascending=False)
+                
+                for session_id, data in sessions.iterrows():
+                    agent_emoji = "🤖"
+                    for agent in registry.get_active_agents():
+                        if agent.agent_name == data['agent_name']:
+                            agent_emoji = agent.avatar_emoji
+                            break
+                    
+                    summary = (
+                        f"{agent_emoji} **{data['agent_name']}** | "
+                        f"Session: `{session_id}` | "
+                        f"Messages: {data['message_count']} | "
+                        f"Errors: {data['errors']} | "
+                        f"Avg Latency: {data['avg_latency']:.2f}s | "
+                        f"Last Active: {data['latest_timestamp'].strftime('%Y-%m-%d %H:%M')}"
+                    )
+                    
+                    with st.expander(summary):
+                        session_df = filtered_df[filtered_df['sessionId'] == session_id].sort_values(by='timestamp', ascending=True)
+                        
+                        for idx, row in session_df.iterrows():
+                            col_time, col_content = st.columns([1, 4])
+                            
+                            with col_time:
+                                st.caption(row['timestamp'].strftime('%H:%M:%S'))
+                                st.caption(f"{row['agentLatency']/1000:.2f}s")
+                                if row['feedbackStatus']:
+                                    emoji = "👍" if row['feedbackStatus'] == 'positive' else "👎"
+                                    st.caption(f"{emoji} {row['feedbackStatus']}")
+                            
+                            with col_content:
+                                st.markdown(f"**👤 User:** {row['userMessage']}")
+                                st.markdown(f"**🤖 Agent:** {row['agentResponse']}")
+                                
+                                # CRITICAL: Show negative feedback reason
+                                if row['feedbackStatus'] == 'negative' and row['feedbackReason'] and row['feedbackReason'] != '':
+                                    st.markdown(f'<div class="feedback-negative">❌ Feedback Reason: {row["feedbackReason"]}</div>', unsafe_allow_html=True)
+                                
+                                # INNOVATIVE: Parse and display agent rationale
+                                if row['agentRationale'] and row['agentRationale'] != '':
+                                    with st.expander("🧠 View Agent Reasoning"):
+                                        rationale_steps = parse_agent_rationale(row['agentRationale'])
+                                        
+                                        if rationale_steps:
+                                            for step in rationale_steps:
+                                                if step['type'] == 'thinking':
+                                                    st.markdown(f'<div class="rationale-thinking">💭 **Thinking:** {step["content"]}</div>', unsafe_allow_html=True)
+                                                elif step['type'] == 'tool_call':
+                                                    st.markdown(f'<div class="rationale-tool">🔧 **{step["content"]}**</div>', unsafe_allow_html=True)
+                                                elif step['type'] == 'tool_result':
+                                                    st.markdown(f'<div class="rationale-tool">📊 **Result:** {step["content"]}</div>', unsafe_allow_html=True)
+                                                elif step['type'] == 'answer':
+                                                    st.markdown(f'<div class="rationale-answer">✅ **Answer:** {step["content"]}</div>', unsafe_allow_html=True)
+                                        else:
+                                            # Fallback: show raw rationale
+                                            st.text(row['agentRationale'][:500])
+                                
+                                if row['status'] != 'SUCCESS':
+                                    st.error(f"❌ Error: {row['status']}")
+                            
+                            st.markdown("---")
+            else:
+                st.info("No sessions match the selected filters.")
+        else:
+            st.warning("⚠️ No session data available.")
+            
+    elif page == "💰 Cost Analytics":
+        st.markdown('<div class="main-header">💰 Cost Analytics</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sub-header">Comprehensive cost tracking with dynamic per-query model-based calculation</div>', unsafe_allow_html=True)
+        
+        if not log_df.empty:
+            metrics_engine = MetricsEngine(log_df)
+            fleet_metrics = metrics_engine.get_fleet_metrics()
+            cost_breakdown = metrics_engine.get_cost_breakdown()
+            
+            # Calculate actual timespan
+            days_span = (log_df['timestamp'].max() - log_df['timestamp'].min()).days + 1
+            
+            # Top-level cost metrics
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                range_label = time_range if selected_days else "All Time"
+                st.metric(f"Total Cost ({range_label})", f"${fleet_metrics['total_cost']:.2f}")
+                st.caption(f"Over {days_span} days")
+            
+            with col2:
+                st.metric("Daily Average", f"${fleet_metrics['daily_avg_cost']:.2f}")
+                st.caption("Average per day")
+            
+            with col3:
+                st.metric("Monthly Projection", f"${fleet_metrics['monthly_projection']:.2f}")
+                st.caption("Based on daily average")
+            
+            with col4:
+                st.metric("Cost per Query", f"${fleet_metrics['avg_cost_per_query']:.4f}")
+                st.caption("Average across all agents")
+            
+            st.markdown("---")
+            
+            # Cost breakdown table
+            st.markdown("### 📊 Cost Breakdown by Agent")
+            st.caption("💡 **Note:** Costs calculated dynamically per query based on modelId - agents can use different models!")
+            
+            if not cost_breakdown.empty:
+                display_df = cost_breakdown[['agent_name', 'queries', 'total_cost', 
+                                            'avg_cost_per_query', 'cost_percentage', 
+                                            'input_tokens', 'output_tokens']].copy()
+                
+                display_df.columns = ['Agent', 'Queries', 'Total Cost', 'Avg Cost/Query', 
+                                     'Cost %', 'Input Tokens', 'Output Tokens']
+                
+                display_df['Total Cost'] = display_df['Total Cost'].apply(lambda x: f"${x:.2f}")
+                display_df['Avg Cost/Query'] = display_df['Avg Cost/Query'].apply(lambda x: f"${x:.4f}")
+                display_df['Cost %'] = display_df['Cost %'].apply(lambda x: f"{x:.1f}%")
+                display_df['Input Tokens'] = display_df['Input Tokens'].apply(lambda x: f"{x:,.0f}")
+                display_df['Output Tokens'] = display_df['Output Tokens'].apply(lambda x: f"{x:,.0f}")
+                
+                st.dataframe(display_df, use_container_width=True, hide_index=True)
+            
+            st.markdown("---")
+            
+            # Cost trends and projections
+            col_trend, col_proj = st.columns(2)
+            
+            with col_trend:
+                st.markdown("### 📈 Daily Cost Trend")
+                daily_metrics = metrics_engine.get_daily_metrics()
+                
+                if not daily_metrics.empty:
+                    daily_metrics['date_str'] = pd.to_datetime(daily_metrics['date']).dt.strftime('%b %d')
+                    
+                    fig = px.area(
+                        daily_metrics,
+                        x='date_str',
+                        y='cost',
+                        title='',
+                        labels={'date_str': 'Date', 'cost': 'Daily Cost ($)'},
+                        color_discrete_sequence=['#10B981']
+                    )
+                    fig.update_layout(height=350)
+                    st.plotly_chart(fig, use_container_width=True)
+            
+            with col_proj:
+                st.markdown("### 🔮 Cost Projections")
+                
+                st.metric("Current Period", f"${fleet_metrics['total_cost']:.2f}")
+                st.metric("30-Day Projection", f"${fleet_metrics['monthly_projection']:.2f}")
+                st.metric("90-Day Projection", f"${fleet_metrics['monthly_projection'] * 3:.2f}")
+                st.metric("Annual Projection", f"${fleet_metrics['monthly_projection'] * 12:.2f}")
+                
+                st.caption("Projections based on current usage patterns")
+            
+            st.markdown("---")
+            
+            # Token utilization
+            st.markdown("### 🎯 Token Utilization")
+            
+            col_tok1, col_tok2 = st.columns(2)
+            
+            with col_tok1:
+                st.metric("Total Input Tokens", f"{fleet_metrics['total_input_tokens']:,.0f}")
+                st.metric("Total Output Tokens", f"{fleet_metrics['total_output_tokens']:,.0f}")
+            
+            with col_tok2:
+                if not cost_breakdown.empty:
+                    fig = go.Figure(data=[
+                        go.Bar(name='Input Tokens', x=cost_breakdown['agent_name'], y=cost_breakdown['input_tokens']),
+                        go.Bar(name='Output Tokens', x=cost_breakdown['agent_name'], y=cost_breakdown['output_tokens'])
+                    ])
+                    fig.update_layout(
+                        barmode='group',
+                        height=300,
+                        title='Token Usage by Agent',
+                        xaxis_title='Agent',
+                        yaxis_title='Tokens'
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.warning("⚠️ No cost data available.")
     
     elif page == "⚙️ Agent Management":
-        st.info("Agent Management page - implementation continues as in original code...")
+        st.markdown('<div class="main-header">⚙️ Agent Management</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sub-header">Configure and manage AI agents in the enterprise</div>', unsafe_allow_html=True)
+        
+        tab1, tab2 = st.tabs(["📋 Agent Registry", "➕ Add New Agent"])
+        
+        with tab1:
+            st.markdown("### Current Agents")
+            
+            for agent in registry.get_all_agents():
+                with st.container():
+                    col1, col2, col3 = st.columns([1, 3, 1])
+                    
+                    with col1:
+                        st.markdown(f"<div style='font-size: 3rem; text-align: center;'>{agent.avatar_emoji}</div>", unsafe_allow_html=True)
+                    
+                    with col2:
+                        st.markdown(f"### {agent.display_name}")
+                        st.markdown(f"**ID:** `{agent.agent_id}`")
+                        st.markdown(f"**Type:** {agent.agent_type.title()} | **Department:** {agent.department}")
+                        st.markdown(f"**Model:** {agent.model_id}")
+                        st.caption(agent.description)
+                        st.caption(f"**Capabilities:** {', '.join(agent.capabilities)}")
+                    
+                    with col3:
+                        status_class = "status-active" if agent.status == "active" else "status-maintenance"
+                        st.markdown(f'<div style="text-align: center;"><span class="{status_class}">{agent.status.upper()}</span></div>', unsafe_allow_html=True)
+                        
+                        st.markdown("---")
+                        
+                        if agent.status == "active":
+                            if st.button(f"🔧 Maintenance", key=f"maint_{agent.agent_id}"):
+                                registry.update_agent_status(agent.agent_id, "maintenance")
+                                st.success(f"Agent {agent.display_name} set to maintenance mode")
+                                st.rerun()
+                        else:
+                            if st.button(f"✅ Activate", key=f"activate_{agent.agent_id}"):
+                                registry.update_agent_status(agent.agent_id, "active")
+                                st.success(f"Agent {agent.display_name} activated")
+                                st.rerun()
+                    
+                    st.markdown("---")
+        
+        with tab2:
+            st.markdown("### Add New Agent to Registry")
+            st.info("🚧 Agent creation interface - Coming soon in production version")
